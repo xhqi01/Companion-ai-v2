@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { q } from "../db.js";
 import { decrypt } from "../lib/crypto.js";
+import { extractionHealth } from "../lib/persona.js";
+import { evaluateFidelity } from "../lib/eval.js";
 
 const r = Router();
 
@@ -30,7 +32,9 @@ r.get("/:id", async (req, res) => {
     [req.params.id, req.userId]
   );
   if (!rows[0]) return res.status(404).json({ error: "not found" });
-  res.json(rows[0]);
+  // 附带提取健康度（有多少档案的特征提取是干净无问题的）
+  const health = await extractionHealth(req.params.id);
+  res.json({ ...rows[0], extractionHealth: health });
 });
 
 r.patch("/:id", async (req, res) => {
@@ -82,6 +86,31 @@ r.get("/:id/export", async (req, res) => {
   const safeName = c.name.replace(/[^\p{L}\p{N}_-]+/gu, "_").slice(0, 40) || "character";
   res.setHeader("Content-Disposition", `attachment; filename="companion-${safeName}-export.json"`);
   res.json(payload);
+});
+
+/* GET /api/characters/:id/eval — 人设保真度评估 (held-out 消息预测)
+   返回 fidelity score (0-1) + 逐对样本。消耗少量 LLM+embedding 调用，不改任何数据。 */
+r.get("/:id/eval", async (req, res) => {
+  const { rows: cRows } = await q(
+    "SELECT id, name, language, persona_model FROM characters WHERE id=$1 AND user_id=$2",
+    [req.params.id, req.userId]
+  );
+  if (!cRows[0]) return res.status(404).json({ error: "not found" });
+
+  // 拉取该角色所有文本档案并解密
+  const { rows: aRows } = await q(
+    "SELECT kind, content_enc FROM archives WHERE character_id=$1 AND kind='text' AND status='done'",
+    [req.params.id]
+  );
+  const archives = aRows.map((a) => ({ kind: a.kind, content: decrypt(a.content_enc) }));
+
+  try {
+    const result = await evaluateFidelity(archives, cRows[0], { sampleSize: 8 });
+    res.json(result);
+  } catch (e) {
+    console.error("[eval]", e);
+    res.status(500).json({ error: "评估失败，请重试" });
+  }
 });
 
 r.delete("/:id", async (req, res) => {

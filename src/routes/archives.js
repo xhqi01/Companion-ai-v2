@@ -4,6 +4,7 @@ import { encrypt, decrypt } from "../lib/crypto.js";
 import { embed, chunkText, toVectorLiteral } from "../lib/embeddings.js";
 import { chat } from "../lib/llm.js";
 import { extractFeatures, aggregateModel } from "../lib/persona.js";
+import { validateFeatures } from "../lib/validate.js";
 import { enqueue, isBusy } from "../lib/jobs.js";
 
 const r = Router({ mergeParams: true });
@@ -41,28 +42,33 @@ async function imageToText(mediaType, data) {
 }
 
 /* ---------- 内部: 处理单个档案（提取特征缓存 + 向量索引） ---------- */
-async function processArchive(characterId, characterName, archiveId, kind, content, mediaType) {
+async function processArchive(characterId, characterName, archiveId, kind, content, mediaType, mode = "fast") {
   let textForIndex;
   let features;
-  if (kind === "image") {
+  const isImage = kind === "image";
+  if (isImage) {
     textForIndex = await imageToText(mediaType, content);
-    features = await extractFeatures(characterName, { data: content, mediaType }, true);
+    features = await extractFeatures(characterName, { data: content, mediaType }, true, mode);
   } else {
     textForIndex = content;
-    features = await extractFeatures(characterName, content, false);
+    features = await extractFeatures(characterName, content, false, mode);
   }
-  await q("UPDATE archives SET features=$2 WHERE id=$1", [archiveId, JSON.stringify(features)]);
+  // 提取质量验证（纯程序，零额外API）: 幻觉/冗余/空/过度提取
+  const issues = validateFeatures(features, textForIndex, isImage);
+  if (issues.length) console.warn(`[persona] archive=${archiveId} 提取质量问题:`, issues.map((i) => i.type).join(", "));
+  await q("UPDATE archives SET features=$2, quality_issues=$3 WHERE id=$1",
+    [archiveId, JSON.stringify(features), JSON.stringify(issues)]);
   await indexChunks(characterId, archiveId, textForIndex);
   await aggregateModel(characterId); // 纯DB聚合，零API成本
 }
 
 /* ---------- 后台任务: 处理并更新状态 ---------- */
-function scheduleProcessing(characterId, archiveId, kind, content, mediaType) {
+function scheduleProcessing(characterId, archiveId, kind, content, mediaType, mode = "fast") {
   enqueue(characterId, async () => {
     try {
       const { rows: cRows } = await q("SELECT name FROM characters WHERE id=$1", [characterId]);
       if (!cRows[0]) return; // 角色已被删除
-      await processArchive(characterId, cRows[0].name, archiveId, kind, content, mediaType);
+      await processArchive(characterId, cRows[0].name, archiveId, kind, content, mediaType, mode);
       await q("UPDATE archives SET status='done', updated_at=now() WHERE id=$1", [archiveId]);
     } catch (e) {
       console.error(`[archives] 处理失败 archive=${archiveId}:`, e.message);
@@ -76,9 +82,10 @@ function scheduleProcessing(characterId, archiveId, kind, content, mediaType) {
 // 返回 status=processing, 前端轮询 GET / 直到 done|error
 r.post("/", async (req, res) => {
   const characterId = req.params.characterId;
-  const { kind, label = "", content = "", mediaType = "" } = req.body || {};
+  const { kind, label = "", content = "", mediaType = "", mode = "fast" } = req.body || {};
   if (!["text", "image", "av"].includes(kind)) return res.status(400).json({ error: "kind must be text|image|av" });
   if (kind !== "av" && !content.trim()) return res.status(400).json({ error: "content required" });
+  const extractMode = mode === "deep" ? "deep" : "fast";
 
   const status = kind === "av" && !content.trim() ? "pending_transcript" : "processing";
   const { rows } = await q(
@@ -90,7 +97,7 @@ r.post("/", async (req, res) => {
 
   // 关键改动: 不再await处理过程, 立刻返回
   if (status === "processing") {
-    scheduleProcessing(characterId, archive.id, kind, content, mediaType);
+    scheduleProcessing(characterId, archive.id, kind, content, mediaType, extractMode);
   }
   res.status(202).json(archive); // 202 Accepted: 已接受, 处理中
 });
@@ -173,7 +180,7 @@ r.post("/rebuild", async (req, res) => {
       try {
         await q("UPDATE archives SET status='processing', updated_at=now() WHERE id=$1", [a.id]);
         await q("DELETE FROM chunks WHERE archive_id=$1", [a.id]);
-        await processArchive(characterId, cRows[0].name, a.id, a.kind, content, a.media_type);
+        await processArchive(characterId, cRows[0].name, a.id, a.kind, content, a.media_type, "deep");
         await q("UPDATE archives SET status='done', updated_at=now() WHERE id=$1", [a.id]);
       } catch (e) {
         console.error(`[rebuild] archive=${a.id} 失败:`, e.message);

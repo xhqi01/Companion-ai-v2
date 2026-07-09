@@ -64,14 +64,20 @@ function toOpenAI(system, messages) {
   return [{ role: "system", content: system }, ...mapped];
 }
 
-export async function chat(system, messages, maxTokens = 1200) {
+// 深度/快速两档模型（不配则都回退到 MODEL）
+const DEEP_MODEL = process.env.LLM_DEEP_MODEL || MODEL;
+const FAST_MODEL = process.env.LLM_FAST_MODEL || MODEL;
+export const MODELS = { default: MODEL, deep: DEEP_MODEL, fast: FAST_MODEL };
+
+export async function chat(system, messages, maxTokens = 1200, opts = {}) {
   if (!API_KEY) throw new Error("缺少 LLM_API_KEY");
+  const model = opts.model || MODEL;
   return withRetry(async () => {
     if (PROVIDER === "anthropic") {
       const res = await fetchWithTimeout(`${BASE_URL}/v1/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": API_KEY, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system, messages: toAnthropic(messages) }),
+        body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: toAnthropic(messages) }),
       });
       if (!res.ok) throw httpError(res.status, await res.text());
       const data = await res.json();
@@ -81,7 +87,7 @@ export async function chat(system, messages, maxTokens = 1200) {
     const res = await fetchWithTimeout(`${BASE_URL}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-      body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages: toOpenAI(system, messages) }),
+      body: JSON.stringify({ model, max_tokens: maxTokens, messages: toOpenAI(system, messages) }),
     });
     if (!res.ok) throw httpError(res.status, await res.text());
     const data = await res.json();

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS archives (
   media_type    TEXT NOT NULL DEFAULT '',
   status        TEXT NOT NULL DEFAULT 'processing', -- processing | done | error | pending_transcript
   features      JSONB,                           -- 该档案单独提取的特征缓存(增量聚合用)
+  quality_issues JSONB DEFAULT '[]'::jsonb,       -- 提取质量验证发现的问题(幻觉/冗余/空/过度提取)
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -232,11 +232,14 @@ function Workspace({ api, character, onBack, onLogout }) {
   const [tab, setTab] = useState("data");
   const [input, setInput] = useState("");
   const [textFeed, setTextFeed] = useState("");
+  const [deepMode, setDeepMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [feeding, setFeeding] = useState(false);
   const [editing, setEditing] = useState(null);
   const [err, setErr] = useState("");
   const [langBar, setLangBar] = useState(false);
+  const [evalResult, setEvalResult] = useState(null);
+  const [evaluating, setEvaluating] = useState(false);
   const chatEndRef = useRef(null);
   const fileRef = useRef(null);
   const cid = character.id;
@@ -267,13 +270,15 @@ function Workspace({ api, character, onBack, onLogout }) {
   const feedText = async () => {
     const t = textFeed.trim();
     if (!t) return;
+    const mode = deepMode ? "deep" : "fast";
     setTextFeed(""); setFeeding(true); setErr("");
-    try { await api(`/api/characters/${cid}/archives`, { method: "POST", body: { kind: "text", label: t.slice(0, 22), content: t } }); }
+    try { await api(`/api/characters/${cid}/archives`, { method: "POST", body: { kind: "text", label: t.slice(0, 22), content: t, mode } }); }
     catch (e) { setErr(e.message); }
     await refreshArchives(); await refreshDetail(); setFeeding(false);
   };
 
   const feedFiles = async (files) => {
+    const mode = deepMode ? "deep" : "fast";
     setFeeding(true); setErr("");
     for (const file of files) {
       try {
@@ -283,10 +288,10 @@ function Workspace({ api, character, onBack, onLogout }) {
             r.onload = () => res(r.result.split(",")[1]);
             r.onerror = rej; r.readAsDataURL(file);
           });
-          await api(`/api/characters/${cid}/archives`, { method: "POST", body: { kind: "image", label: file.name, content: data, mediaType: file.type } });
+          await api(`/api/characters/${cid}/archives`, { method: "POST", body: { kind: "image", label: file.name, content: data, mediaType: file.type, mode } });
         } else if (file.type.startsWith("text/") || /\.(txt|md|csv|json)$/i.test(file.name)) {
           const text = (await file.text()).slice(0, 30000);
-          await api(`/api/characters/${cid}/archives`, { method: "POST", body: { kind: "text", label: file.name, content: text } });
+          await api(`/api/characters/${cid}/archives`, { method: "POST", body: { kind: "text", label: file.name, content: text, mode } });
         } else {
           await api(`/api/characters/${cid}/archives`, { method: "POST", body: { kind: "av", label: file.name, content: "" } });
         }
@@ -330,6 +335,14 @@ function Workspace({ api, character, onBack, onLogout }) {
       a.download = `companion-${(detail.name || "character").replace(/[^\p{L}\p{N}_-]+/gu, "_").slice(0, 40)}-export.json`;
       a.click(); URL.revokeObjectURL(a.href);
     } catch (e) { setErr(e.message); }
+  };
+
+  const runEval = async () => {
+    setEvaluating(true); setErr(""); setEvalResult(null);
+    try {
+      const result = await api(`/api/characters/${cid}/eval`);
+      setEvalResult(result);
+    } catch (e) { setErr(e.message); } finally { setEvaluating(false); }
   };
 
   /* ---------- 对话 ---------- */
@@ -423,13 +436,28 @@ function Workspace({ api, character, onBack, onLogout }) {
                 <input ref={fileRef} type="file" multiple hidden accept="image/*,text/*,.txt,.md,.csv,.json,audio/*,video/*"
                   onChange={(e) => { feedFiles([...e.target.files]); e.target.value = ""; }} />
               </div>
+              <div onClick={() => setDeepMode(!deepMode)} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "10px 13px", borderRadius: 10, cursor: "pointer",
+                background: deepMode ? S.claySoft : S.card, border: `1px solid ${deepMode ? S.clayLine : S.line}`,
+              }}>
+                <div style={{
+                  width: 34, height: 20, borderRadius: 20, flexShrink: 0, position: "relative", transition: "background .16s",
+                  background: deepMode ? S.clay : S.line,
+                }}>
+                  <div style={{ position: "absolute", top: 2, left: deepMode ? 16 : 2, width: 16, height: 16, borderRadius: "50%", background: "#FBF8F2", transition: "left .16s" }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 500, color: deepMode ? S.clay : S.ink }}>深度提取{deepMode ? "（已开）" : ""}</div>
+                  <div style={{ fontSize: 11, color: S.inkSoft, marginTop: 1 }}>用更强的模型，特征更准但更慢更贵。重要档案建议开。</div>
+                </div>
+              </div>
               <div>
                 <div style={{ fontFamily: serif, fontSize: 15, fontWeight: 500, marginBottom: 10 }}>或者，粘贴一段文字</div>
                 <textarea value={textFeed} onChange={(e) => setTextFeed(e.target.value)}
                   placeholder={"[6 月 12 日]\n他：诶 到家了吗\n我：刚到\n他：那就好 早点睡"}
                   style={inp({ minHeight: 110, width: "100%", resize: "vertical", fontSize: 13, lineHeight: 1.7 })} />
                 <Btn onClick={feedText} disabled={!textFeed.trim() || feeding} style={{ width: "100%", marginTop: 10 }}>
-                  {feeding ? "处理中…" : "存档并提取"}
+                  {feeding ? "处理中…" : deepMode ? "深度存档并提取" : "存档并提取"}
                 </Btn>
               </div>
               {archives.length > 0 && (
@@ -458,7 +486,54 @@ function Workspace({ api, character, onBack, onLogout }) {
           {tab === "model" && (
             <div style={pane}>
               <div style={paneIntro}>模型是所有档案特征的聚合。档案一变，模型立刻更新，不额外花 API。</div>
-              <MBlock title="原话样本" count={model.phrases.length} items={model.phrases} quote />
+              {detail.extractionHealth?.score != null && (
+                <div style={{
+                  fontSize: 12, padding: "10px 13px", borderRadius: 10,
+                  background: detail.extractionHealth.score >= 0.8 ? "rgba(151,160,136,.12)" : S.claySoft,
+                  border: `1px solid ${detail.extractionHealth.score >= 0.8 ? "rgba(151,160,136,.3)" : S.clayLine}`,
+                  color: S.inkSoft, lineHeight: 1.6,
+                }}>
+                  <span style={{ fontFamily: serif, fontSize: 13, color: S.ink }}>提取健康度 {Math.round(detail.extractionHealth.score * 100)}%</span>
+                  <br />{detail.extractionHealth.clean}/{detail.extractionHealth.total} 份档案的特征提取无异常（无幻觉、无冗余、无过度提取）
+                </div>
+              )}
+
+              {/* 人设保真度评估 */}
+              <div style={{ border: `1px solid ${S.line}`, borderRadius: 12, padding: 14, background: S.card }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: evalResult ? 12 : 0 }}>
+                  <div>
+                    <div style={{ fontFamily: serif, fontSize: 14, fontWeight: 500 }}>人设保真度</div>
+                    <div style={{ fontSize: 11, color: S.inkSoft, marginTop: 2 }}>用留出的真实消息测模型模仿得像不像</div>
+                  </div>
+                  <Btn ghost small onClick={runEval} disabled={evaluating}>{evaluating ? "评估中…" : evalResult ? "重测" : "运行评估"}</Btn>
+                </div>
+                {evalResult && evalResult.score != null && (
+                  <div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 10, padding: "8px 0" }}>
+                      <span style={{ fontFamily: serif, fontSize: 30, fontWeight: 500, color: S.clay }}>{evalResult.score.toFixed(2)}</span>
+                      <span style={{ fontSize: 13, color: S.inkSoft }}>等级 {evalResult.grade} · 采样 {evalResult.sampledPairs}/{evalResult.totalPairs} 对</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: S.inkFaint, lineHeight: 1.6, marginBottom: 10 }}>
+                      0.85+ 极像 · 0.72+ 相近 · 0.55+ 有神韵 · 更低说明数据还不够
+                    </div>
+                    {evalResult.samples?.slice(0, 3).map((s, i) => (
+                      <div key={i} style={{ fontSize: 11.5, padding: "8px 10px", marginBottom: 6, background: S.paper, border: `1px solid ${S.lineSoft}`, borderRadius: 8, lineHeight: 1.6 }}>
+                        <div style={{ color: S.inkFaint }}>问：{s.prompt}</div>
+                        <div style={{ color: S.ink, marginTop: 2 }}>真实：{s.actual}</div>
+                        <div style={{ color: S.clay, marginTop: 2 }}>预测：{s.predicted}</div>
+                        <div style={{ color: S.inkFaint, marginTop: 2, fontSize: 10.5 }}>相似度 {s.similarity}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {evalResult && evalResult.score == null && (
+                  <div style={{ fontSize: 11.5, color: S.inkSoft, marginTop: 8, lineHeight: 1.6 }}>
+                    {evalResult.reason === "insufficient_pairs"
+                      ? `对话对不足（当前 ${evalResult.pairs} 对，至少需要 3 对）。多喂一些「对方一句、TA 一句」格式的聊天记录。`
+                      : "评估暂时无法完成，稍后再试。"}
+                  </div>
+                )}
+              </div>
               <MBlock title="说话风格" count={model.style.length} items={model.style} clay />
               <MBlock title="客观事实" count={model.facts.length} items={model.facts} />
               <MBlock title="行为模式" count={model.patterns.length} items={model.patterns} />

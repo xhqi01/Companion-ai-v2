@@ -190,6 +190,9 @@ DELETE /api/characters/:id/chat/history
 
 ### What's hardened in v2.0
 
+- **Type-aware, tiered extraction** — image archives use a vision-specific prompt that first identifies who in a screenshot is the character vs. "me" (so the other party's messages aren't misattributed), while text archives use a chat-optimized prompt. A **deep-extraction toggle** lets important archives use a stronger model; `rebuild` always runs deep. Fast/deep models are separately configurable via `LLM_FAST_MODEL` / `LLM_DEEP_MODEL`.
+- **Extraction quality validation** — every persona extraction is checked by a dependency-free validator (`src/lib/validate.js`): phantom-phrase detection (a "verbatim" quote that isn't in the source is flagged), verbosity checks, empty/over-extraction checks. Issues are stored per archive and surfaced as an **extraction health score** in the UI. Inspired by olmOCR's principle that structured output should be measured against programmatically verifiable criteria.
+- **Persona fidelity benchmark** — `GET /api/characters/:id/eval` runs a held-out evaluation: it parses real (prompt → reply) pairs from the archives, hides the answers, predicts how the persona would reply, and scores prediction vs. truth by embedding cosine similarity. The average is a **fidelity score (0–1)**, gradable A–D, shown in the model tab with per-pair comparisons. A quantifiable, reproducible answer to "how faithful is this persona?" — the kind of benchmark the AI-companion space usually lacks.
 - **Async archive processing** — `POST /archives` returns `202` immediately; feature extraction and embedding run in a per-character background queue (serial per character to avoid aggregation races, parallel across characters). Frontend polls status. Large uploads no longer block or time out HTTP requests.
 - **httpOnly cookie sessions** — tokens are no longer stored in `localStorage` (XSS-stealable). Sessions ride in `httpOnly` cookies; `Bearer` header still works for API clients and scripts.
 - **Batch chunk insertion** — one SQL statement instead of N round-trips; embeddings requested in batches of 64.
@@ -378,6 +381,9 @@ DELETE /api/characters/:id/chat/history
 
 ### v2.0 工程强化
 
+- **分类型、分档提取** — 图片档案用专门的视觉 prompt，先判定截图里谁是角色、谁是「我」，避免把对方的话当成 TA 的；文字档案用针对聊天记录优化的 prompt。新增「深度提取」开关，重要档案可用更强模型，「重建」始终走深度档。快速/深度模型可通过 `LLM_FAST_MODEL` / `LLM_DEEP_MODEL` 分别配置。
+- **提取质量验证** — 每次人设提取都会过一层零依赖验证器（`src/lib/validate.js`）：幻觉检测（声称逐字摘录但原文里没有的句子会被标记）、冗余检测、空/过度提取检测。问题按档案记录，UI 里显示为「提取健康度」。灵感来自 olmOCR：结构化输出应该用可程序验证的标准衡量。
+- **人设保真度基准** — `GET /api/characters/:id/eval` 跑 held-out 评估：从档案解析真实的「对方一句 → 角色回复」对，藏起答案，用当前人设预测角色会怎么回，再用 embedding 余弦相似度给预测 vs 真实打分。平均值即 **fidelity score（0-1）**，分 A–D 等级，在模型 tab 里带逐对对比展示。给「这个人设到底像不像」一个可量化、可复现的答案——这正是 AI companion 赛道普遍缺的东西。
 - **档案异步处理** — `POST /archives` 立刻返回 `202`，特征提取和向量化在按角色隔离的后台队列执行（同角色串行防聚合竞态，跨角色并行），前端轮询状态。大文件上传不再阻塞或超时。
 - **httpOnly cookie 会话** — token 不再存 `localStorage`（可被 XSS 窃取），改由 `httpOnly` cookie 承载；`Bearer` 头继续支持 API 客户端和脚本。
 - **分块批量入库** — 单条 SQL 批量 INSERT 替代 N 次往返；embedding 按 64 条/批请求。

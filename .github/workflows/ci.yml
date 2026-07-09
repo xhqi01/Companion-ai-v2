@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: 单元测试 + 语法检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+        env:
+          JWT_SECRET: test_secret_at_least_32_characters_long_xx
+          ENCRYPTION_KEY: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+
+  integration:
+    name: 集成测试（真实数据库）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: companion_test
+          POSTGRES_USER: companion
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://companion:test@localhost:5432/companion_test
+      DATABASE_SSL: "false"
+      JWT_SECRET: test_secret_at_least_32_characters_long_xx
+      ENCRYPTION_KEY: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      LLM_PROVIDER: openai
+      LLM_API_KEY: test_key
+      EMBEDDING_API_KEY: test_key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: 初始化测试数据库
+        run: node src/db-init.js
+      - name: 运行集成测试
+        run: npm run test:integration
+
+  docker:
+    name: Docker 构建验证
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t companion-test .
+
+  frontend:
+    name: 前端构建验证
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - working-directory: frontend
+        run: npm install && npm run build

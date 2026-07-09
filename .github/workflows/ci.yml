@@ -16,7 +16,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      - run: npm ci || npm install
       - run: npm run lint
       - run: npm test
         env:
@@ -54,7 +54,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      - run: npm ci || npm install
       - name: 初始化测试数据库
         run: node src/db-init.js
       - name: 运行集成测试

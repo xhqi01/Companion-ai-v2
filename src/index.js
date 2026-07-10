@@ -8,7 +8,7 @@ import charactersRouter from "./routes/characters.js";
 import archivesRouter from "./routes/archives.js";
 import chatRouter from "./routes/chat.js";
 import { authRouter, requireAuth, requireOwnership } from "./lib/auth.js";
-import { recoverStuckArchives } from "./lib/jobs.js";
+import { recoverStuckArchives, resumePendingJobs } from "./lib/jobs.js";
 import { pool } from "./db.js";
 
 const app = express();
@@ -54,7 +54,8 @@ const PORT = process.env.PORT || 3001;
 const server = app.listen(PORT, async () => {
   console.log(`companion-backend listening on :${PORT}`);
   try {
-    await recoverStuckArchives(); // 恢复上次进程中断时卡住的档案
+    await recoverStuckArchives();   // 清理无主的 processing 档案
+    await resumePendingJobs();       // 重启后续跑上次未完成的持久化任务(handler 已随路由 import 注册)
   } catch (e) {
     console.error("启动恢复失败:", e.message);
   }

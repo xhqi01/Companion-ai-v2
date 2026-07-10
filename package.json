@@ -8,6 +8,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "db:init": "node src/db-init.js",
+    "key:split": "node scripts/key-shares.js split",
+    "key:combine": "node scripts/key-shares.js combine",
     "test": "node --test src/lib/*.test.js",
     "lint": "find src -name '*.js' -exec node --check {} +",
     "test:integration": "node --test src/integration.test.js"

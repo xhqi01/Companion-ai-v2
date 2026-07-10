@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS characters (
   persona_model JSONB NOT NULL DEFAULT '{"facts":[],"style":[],"phrases":[],"patterns":[]}',
   memory        JSONB NOT NULL DEFAULT '{"facts":[],"patterns":[],"emotions":"","threads":[]}',
   msg_count     INTEGER NOT NULL DEFAULT 0,
+  last_grounded_at INTEGER NOT NULL DEFAULT 0,  -- 上次“落地提示”发生在第几轮(用户健康度守护, 见 lib/wellbeing.js)
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_characters_user ON characters(user_id);
@@ -37,7 +38,8 @@ CREATE TABLE IF NOT EXISTS archives (
   media_type    TEXT NOT NULL DEFAULT '',
   status        TEXT NOT NULL DEFAULT 'processing', -- processing | done | error | pending_transcript
   features      JSONB,                           -- 该档案单独提取的特征缓存(增量聚合用)
-  quality_issues JSONB DEFAULT '[]'::jsonb,       -- 提取质量验证发现的问题(幻觉/冗余/空/过度提取)
+  quality_issues JSONB DEFAULT '[]'::jsonb,       -- 提取质量验证发现的问题(幻觉/冗余/空/过度提取/低置信转录)
+  transcript_meta JSONB,                          -- 图片档案的转录自评: { confidence, ambiguities } (见 routes/archives.js)
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -66,3 +68,18 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_messages_character ON messages(character_id, id);
+
+-- 持久化后台任务：昂贵任务(档案处理/重建)落库, 进程重启后自动续跑(见 lib/jobs.js)
+CREATE TABLE IF NOT EXISTS jobs (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  character_id  UUID NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+  type          TEXT NOT NULL,                   -- process_archive | rebuild
+  payload       JSONB NOT NULL DEFAULT '{}',     -- 可序列化的纯数据(如 { archiveId })
+  status        TEXT NOT NULL DEFAULT 'queued',  -- queued | running | done | error
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  last_error    TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(status) WHERE status IN ('queued','running');
+CREATE INDEX IF NOT EXISTS idx_jobs_character ON jobs(character_id);

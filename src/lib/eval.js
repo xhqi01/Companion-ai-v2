@@ -11,8 +11,10 @@
 
    纯读操作，不改任何数据。评估本身消耗少量 LLM+embedding 调用。
    ============================================================ */
-import { embed } from "./embeddings.js";
+import { embed, toVectorLiteral } from "./embeddings.js";
 import { chat } from "./llm.js";
+import { q } from "../db.js";
+import { SCORE_SWEEP_GRID, resolveRetrievalParams } from "./retrieval.js";
 
 // 余弦相似度
 export function cosine(a, b) {
@@ -119,5 +121,75 @@ export async function evaluateFidelity(archives, character, opts = {}) {
     sampledPairs: results.length,
     totalPairs: pairs.length,
     samples: results,
+  };
+}
+
+/* ============================================================
+   检索阈值扫描 (retrieval threshold sweep)
+   目的: 把“MIN_SCORE 该设多少”从拍脑袋变成看数据。
+   方法: 用该角色真实的对话 prompt 当查询, 跑向量检索, 统计每个候选阈值下
+         平均命中数与命中分数分布, 帮你为这个角色选出合适的阈值。
+   纯读操作。相比固定 0.25, 结合 retrieval.js 的自适应策略一起用效果最好。
+   ============================================================ */
+export async function sweepRetrievalThreshold(characterId, archives, roleName, opts = {}) {
+  const sampleSize = opts.sampleSize || 12;
+
+  // 1. 从文本档案里取角色对话的“上一句”当作真实查询语料
+  let prompts = [];
+  for (const a of archives) {
+    if (a.kind !== "text") continue;
+    prompts.push(...parsePairs(a.content, roleName).map((p) => p.prompt));
+  }
+  prompts = prompts.filter((p) => p && p.length > 1);
+  if (prompts.length < 3) return { ok: false, reason: "insufficient_queries", queries: prompts.length };
+
+  // 均匀采样
+  const step = Math.max(1, Math.floor(prompts.length / sampleSize));
+  const sample = [];
+  for (let i = 0; i < prompts.length && sample.length < sampleSize; i += step) sample.push(prompts[i]);
+
+  // 2. chunk 总数 → 自适应参数(作为参考基线一并返回)
+  const { rows: cnt } = await q("SELECT count(*)::int AS n FROM chunks WHERE character_id=$1", [characterId]);
+  const chunkCount = cnt[0]?.n || 0;
+  const adaptive = resolveRetrievalParams(chunkCount);
+
+  // 3. 每个查询取 top-12 的分数, 汇总
+  const allScores = [];
+  for (const p of sample) {
+    try {
+      const [qv] = await embed(p);
+      const { rows } = await q(
+        `SELECT 1 - (embedding <=> $2::vector) AS score
+         FROM chunks WHERE character_id=$1
+         ORDER BY embedding <=> $2::vector LIMIT 12`,
+        [characterId, toVectorLiteral(qv)]
+      );
+      allScores.push(rows.map((r) => Number(r.score)));
+    } catch (e) {
+      console.error("[sweep] query failed:", e.message);
+    }
+  }
+  if (!allScores.length) return { ok: false, reason: "all_failed" };
+
+  // 4. 对每个候选阈值: 平均每查询能留下几条
+  const grid = SCORE_SWEEP_GRID.map((thr) => {
+    const kept = allScores.map((scores) => scores.filter((s) => s > thr).length);
+    const avgKept = kept.reduce((a, b) => a + b, 0) / kept.length;
+    const emptyRate = kept.filter((k) => k === 0).length / kept.length; // 完全没召回的查询占比
+    return { threshold: thr, avgKept: Number(avgKept.toFixed(2)), emptyRate: Number(emptyRate.toFixed(2)) };
+  });
+
+  // 5. 给个直觉建议: 在“召回不落空(emptyRate 低)”与“不过量(avgKept 适中)”之间取平衡
+  const recommended = grid
+    .filter((g) => g.emptyRate <= 0.2)
+    .sort((a, b) => a.avgKept - b.avgKept)[0]?.threshold ?? adaptive.minScore;
+
+  return {
+    ok: true,
+    chunkCount,
+    sampledQueries: allScores.length,
+    adaptiveBaseline: adaptive,     // 当前自适应策略会用的参数
+    grid,                            // 各阈值的召回统计
+    recommendedThreshold: recommended,
   };
 }

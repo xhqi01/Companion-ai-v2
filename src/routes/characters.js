@@ -2,7 +2,7 @@ import { Router } from "express";
 import { q } from "../db.js";
 import { decrypt } from "../lib/crypto.js";
 import { extractionHealth } from "../lib/persona.js";
-import { evaluateFidelity } from "../lib/eval.js";
+import { evaluateFidelity, sweepRetrievalThreshold } from "../lib/eval.js";
 
 const r = Router();
 
@@ -110,6 +110,29 @@ r.get("/:id/eval", async (req, res) => {
   } catch (e) {
     console.error("[eval]", e);
     res.status(500).json({ error: "评估失败，请重试" });
+  }
+});
+
+/* GET /api/characters/:id/retrieval-sweep — 检索阈值扫描
+   用该角色真实对话语料跑检索, 统计各候选阈值的召回情况, 帮你选 MIN_SCORE。
+   纯读操作, 消耗少量 embedding 调用。 */
+r.get("/:id/retrieval-sweep", async (req, res) => {
+  const { rows: cRows } = await q(
+    "SELECT id, name FROM characters WHERE id=$1 AND user_id=$2",
+    [req.params.id, req.userId]
+  );
+  if (!cRows[0]) return res.status(404).json({ error: "not found" });
+  const { rows: aRows } = await q(
+    "SELECT kind, content_enc FROM archives WHERE character_id=$1 AND kind='text' AND status='done'",
+    [req.params.id]
+  );
+  const archives = aRows.map((a) => ({ kind: a.kind, content: decrypt(a.content_enc) }));
+  try {
+    const result = await sweepRetrievalThreshold(req.params.id, archives, cRows[0].name, { sampleSize: 12 });
+    res.json(result);
+  } catch (e) {
+    console.error("[retrieval-sweep]", e);
+    res.status(500).json({ error: "扫描失败，请重试" });
   }
 });
 

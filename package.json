@@ -1,6 +1,6 @@
 {
   "name": "companion",
-  "version": "2.0.0",
+  "version": "2.4.0",
   "description": "Data-driven AI companion backend — archive-based persona modeling with RAG memory retrieval",
   "type": "module",
   "main": "src/index.js",

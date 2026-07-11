@@ -1,6 +1,6 @@
 # Companion
 
-![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white) ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white) ![React](https://img.shields.io/badge/React-Vite-61DAFB?logo=react&logoColor=black) ![License](https://img.shields.io/badge/license-MIT-blue) ![LLM](https://img.shields.io/badge/LLM-provider--agnostic-8A2BE2)
+![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white) ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white) ![React](https://img.shields.io/badge/React-Vite-61DAFB?logo=react&logoColor=black) ![License](https://img.shields.io/badge/license-MIT-blue) ![LLM](https://img.shields.io/badge/LLM-provider--agnostic-8A2BE2)
 
 **English** · [中文](#中文) · [日本語](#日本語)
 
@@ -168,6 +168,8 @@ GET    /api/characters
 GET    /api/characters/:id
 PATCH  /api/characters/:id               { name?, language? }
 GET    /api/characters/:id/export        →  persona model + memory + archive list as downloadable JSON (?full=1 adds decrypted text archive contents)
+GET    /api/characters/:id/eval          →  persona fidelity score (held-out reply prediction, cosine-scored, graded A–D)
+GET    /api/characters/:id/retrieval-sweep →  recall across candidate thresholds on the character's own corpus, with a recommended value
 DELETE /api/characters/:id
 ```
 
@@ -183,12 +185,12 @@ POST   /api/characters/:id/archives/rebuild
 
 **Chat**
 ```
-POST   /api/characters/:id/chat          { message }  →  { reply, retrievedCount }
+POST   /api/characters/:id/chat          { message }  →  { reply, retrievedCount, retrievalTier }
 GET    /api/characters/:id/chat/history?limit=50
 DELETE /api/characters/:id/chat/history
 ```
 
-### What's hardened (v2.0–v2.3)
+### What's hardened (v2.0–v2.4)
 
 - **Type-aware, tiered extraction** — image archives use a vision-specific prompt that first identifies who in a screenshot is the character vs. "me" (so the other party's messages aren't misattributed), while text archives use a chat-optimized prompt. A **deep-extraction toggle** lets important archives use a stronger model; `rebuild` always runs deep. Fast/deep models are separately configurable via `LLM_FAST_MODEL` / `LLM_DEEP_MODEL`.
 - **Extraction quality validation** — every persona extraction is checked by a dependency-free validator (`src/lib/validate.js`): phantom-phrase detection (a "verbatim" quote that isn't in the source is flagged), verbosity checks, empty/over-extraction checks. Issues are stored per archive and surfaced as an **extraction health score** in the UI. Inspired by olmOCR's principle that structured output should be measured against programmatically verifiable criteria.
@@ -203,13 +205,21 @@ DELETE /api/characters/:id/chat/history
 - **Graceful shutdown, `helmet`, DB-aware `/health`** — production-ready process hygiene.
 - **CI: unit + integration (real pgvector database) + Docker build + frontend build**, all on every push.
 
+**New in v2.4:**
+
+- **Adaptive retrieval** — `src/lib/retrieval.js` scales top-k and the similarity threshold to each character's chunk count: cold-start (little data) loosens the threshold so retrieval never comes up empty; rich data tightens it to filter noise. Explicit `RETRIEVAL_TOP_K` / `RETRIEVAL_MIN_SCORE` still act as hard bounds. `GET /:id/retrieval-sweep` scans candidate thresholds against the character's own corpus and recommends a value; chat replies now carry a `retrievalTier` (cold/growing/rich) for observability.
+- **Persistent background jobs** — `src/lib/jobs.js` writes expensive jobs (archive processing / rebuild) to a `jobs` table before running them, so `resumePendingJobs()` picks them back up after a restart instead of leaving them stranded. Still no Redis — it reuses Postgres. A handler registry decouples scheduling from execution, so a multi-instance deployment can swap in BullMQ cleanly. Completed jobs older than 7 days are pruned on boot.
+- **Disaster-resistant key backup** — `src/lib/keyshares.js` implements Shamir's Secret Sharing over GF(256) (pure JS, zero deps). `npm run key:split` splits `ENCRYPTION_KEY` into N shares (default 3-of-5); any threshold subset reconstructs it, while a single leaked share reveals nothing (information-theoretic). `npm run key:combine` restores it. Runtime crypto is unchanged.
+- **Image-transcription QC** — vision transcription returns `{ transcript, confidence, ambiguities }` and self-scores its own quality. Low confidence (< `TRANSCRIPT_MIN_CONFIDENCE`, default 0.6) or flagged ambiguities write to `quality_issues` for review, so misread screenshots aren't silently baked into the persona model.
+- **User-wellbeing guardrail** — `src/lib/wellbeing.js` detects signals of over-attachment or reality-confusion (EN/ZH/JA) and, at most once per 24 turns, lets the character gently ground the conversation in its own voice ("I was reconstructed from data"). No pop-ups, no lecturing; set `WELLBEING_GROUNDING=off` to disable. Reconstructing someone who's gone has real value — the user's grip on reality is worth protecting too.
+
 ### Known limits (honest, not hidden)
 
 - Archive edits re-extract only that archive's features; deletion is zero API cost. `POST /rebuild` re-extracts everything — use it only when upgrading the extraction logic.
-- Retrieval threshold (0.25) and top-k (6) are tunable via `RETRIEVAL_TOP_K` and `RETRIEVAL_MIN_SCORE` env vars.
+- Retrieval is adaptive by default (top-k and threshold scale with data volume); set `RETRIEVAL_TOP_K` / `RETRIEVAL_MIN_SCORE` to pin fixed hard bounds instead.
 - No password reset flow yet.
 - Screenshots stored as base64 are space-intensive; at scale, store originals in Supabase Storage / S3 / R2 and keep only the transcript text in the database.
-- The background queue is in-process (no Redis needed, zero extra infra) — jobs don't survive restarts, but crash recovery marks them for retry. For multi-instance deployments, swap `src/lib/jobs.js` for BullMQ.
+- The background queue is in-process and backed by Postgres (no Redis, zero extra infra); jobs are persisted and resume after a restart. For multi-instance deployments, swap `src/lib/jobs.js` for BullMQ.
 
 ---
 
@@ -359,6 +369,8 @@ GET    /api/characters
 GET    /api/characters/:id
 PATCH  /api/characters/:id               { name?, language? }
 GET    /api/characters/:id/export        →  人设模型 + 对话记忆 + 档案清单，导出为可下载JSON（?full=1 附带文本档案解密原文）
+GET    /api/characters/:id/eval          →  人设保真度分数（held-out 回复预测，余弦相似度打分，A–D 等级）
+GET    /api/characters/:id/retrieval-sweep →  用角色真实语料扫描各候选阈值的召回率，给出推荐值
 DELETE /api/characters/:id
 ```
 
@@ -374,12 +386,12 @@ POST   /api/characters/:id/archives/rebuild
 
 **对话**
 ```
-POST   /api/characters/:id/chat          { message } → { reply, retrievedCount }
+POST   /api/characters/:id/chat          { message } → { reply, retrievedCount, retrievalTier }
 GET    /api/characters/:id/chat/history?limit=50
 DELETE /api/characters/:id/chat/history
 ```
 
-### 工程强化（v2.0–v2.3）
+### 工程强化（v2.0–v2.4）
 
 - **分类型、分档提取** — 图片档案用专门的视觉 prompt，先判定截图里谁是角色、谁是「我」，避免把对方的话当成 TA 的；文字档案用针对聊天记录优化的 prompt。新增「深度提取」开关，重要档案可用更强模型，「重建」始终走深度档。快速/深度模型可通过 `LLM_FAST_MODEL` / `LLM_DEEP_MODEL` 分别配置。
 - **提取质量验证** — 每次人设提取都会过一层零依赖验证器（`src/lib/validate.js`）：幻觉检测（声称逐字摘录但原文里没有的句子会被标记）、冗余检测、空/过度提取检测。问题按档案记录，UI 里显示为「提取健康度」。灵感来自 olmOCR：结构化输出应该用可程序验证的标准衡量。
@@ -394,13 +406,21 @@ DELETE /api/characters/:id/chat/history
 - **优雅关闭、`helmet`、带数据库连通性的 `/health`** — 生产级进程管理。
 - **CI：单元测试 + 集成测试（真实 pgvector 数据库）+ Docker 构建验证 + 前端构建验证**，每次 push 全跑。
 
+**v2.4 新增：**
+
+- **自适应检索** — `src/lib/retrieval.js` 按角色 chunk 数量自适应 top-k 与阈值：冷启动（数据少）放宽阈值防止检索落空，数据充裕时收紧过滤噪音。显式设置 `RETRIEVAL_TOP_K` / `RETRIEVAL_MIN_SCORE` 仍作为硬边界。`GET /:id/retrieval-sweep` 用角色真实语料扫描各候选阈值给出推荐值；对话响应附带 `retrievalTier`（cold/growing/rich）便于观察。
+- **后台任务持久化** — `src/lib/jobs.js` 把昂贵任务（档案处理/重建）先落库 `jobs` 表再执行，进程重启后 `resumePendingJobs()` 自动续跑，不再只标 error 等手动重试。不引入 Redis，复用现有 Postgres；handler 注册表解耦调度与执行，多实例部署可平滑替换为 BullMQ。启动时自动清理 7 天前的已完成 job。
+- **密钥抗灾备份** — `src/lib/keyshares.js` 实现 GF(256) 上的 Shamir's Secret Sharing（纯 JS 零依赖）。`npm run key:split` 把 `ENCRYPTION_KEY` 拆成 N 份（默认 3-of-5），任意阈值份数可重建，单份泄露零信息（信息论安全）；`npm run key:combine` 还原。运行时加解密逻辑完全不变。
+- **图片转录质检** — 图片转录改为结构化输出 `{ transcript, confidence, ambiguities }`，视觉模型自评质量。低置信（< `TRANSCRIPT_MIN_CONFIDENCE`，默认 0.6）或有歧义 → 写入 `quality_issues` 提示复核，防止误读的截图被固化进人设模型。
+- **用户健康度守护** — `src/lib/wellbeing.js` 检测强依恋/现实混淆信号（中英日），低频触发（默认每 24 轮上限一次）让角色用自己的口吻温柔落地「我是从数据里被重建的」。不弹窗、不出戏、不说教；`WELLBEING_GROUNDING=off` 可整体关闭。重建逝去的人有真实价值，但使用者的现实感同样值得被守护。
+
 ### 已知边界（诚实说明，不是藏起来的坑）
 
 - 档案编辑只重算该条特征，删除零 API 成本。`POST /rebuild` 对全部档案重新提取——仅在提取逻辑升级后使用。
-- 检索阈值（0.25）和 top-k（6）可通过环境变量 `RETRIEVAL_MIN_SCORE` / `RETRIEVAL_TOP_K` 调整。
+- 检索默认自适应（top-k 与阈值随数据量伸缩）；如需固定硬边界，显式设置 `RETRIEVAL_MIN_SCORE` / `RETRIEVAL_TOP_K`。
 - 暂无密码找回流程。
 - 截图以 base64 存储较占空间；数据量大时建议将原图存 Supabase Storage / S3 / R2，数据库只保留转录文本。
-- 后台队列是进程内实现（不需要 Redis，零额外基建）——任务不跨重启存活，但崩溃恢复机制会标记待重试。多实例部署时可把 `src/lib/jobs.js` 换成 BullMQ。
+- 后台队列是进程内实现、以 Postgres 持久化（不需要 Redis，零额外基建）——任务落库后可跨重启续跑。多实例部署时可把 `src/lib/jobs.js` 换成 BullMQ。
 
 ---
 
@@ -533,6 +553,8 @@ GET    /api/characters
 GET    /api/characters/:id
 PATCH  /api/characters/:id               { name?, language? }
 GET    /api/characters/:id/export        →  ペルソナモデル + 会話記憶 + アーカイブ一覧をJSONでダウンロード（?full=1 でテキストアーカイブの復号済み原文も含む）
+GET    /api/characters/:id/eval          →  ペルソナ忠実度スコア（held-out 返信予測、コサイン類似度スコア、A–D 評価）
+GET    /api/characters/:id/retrieval-sweep →  キャラクター自身のコーパスで各候補閾値の再現率をスキャンし、推奨値を提示
 DELETE /api/characters/:id
 ```
 
@@ -548,12 +570,12 @@ POST   /api/characters/:id/archives/rebuild
 
 **チャット**
 ```
-POST   /api/characters/:id/chat          { message }  →  { reply, retrievedCount }
+POST   /api/characters/:id/chat          { message }  →  { reply, retrievedCount, retrievalTier }
 GET    /api/characters/:id/chat/history?limit=50
 DELETE /api/characters/:id/chat/history
 ```
 
-### エンジニアリング強化（v2.0–v2.3）
+### エンジニアリング強化（v2.0–v2.4）
 
 - **タイプ別・階層別抽出** — 画像アーカイブには専用のビジョンプロンプトを使用：スクリーンショット内で誰がキャラクターで誰が「私」かをまず判定し、相手のメッセージを誤って帰属させません。テキストアーカイブはチャット履歴に最適化されたプロンプトを使用。「深度抽出」トグルで重要なアーカイブにはより強力なモデルを使用可能、`rebuild` は常に深度モードで実行。`LLM_FAST_MODEL` / `LLM_DEEP_MODEL` で個別設定可能。
 - **抽出品質検証** — すべてのペルソナ抽出は依存関係ゼロのバリデーター（`src/lib/validate.js`）でチェック：幻覚検出（「逐語的」とされる引用が原文にない場合フラグ）、冗長性チェック、空/過剰抽出チェック。問題はUIに「抽出健全度スコア」として表示。olmOCRの「構造化出力はプログラムで検証可能な基準で測定すべき」という原則にインスパイア。
@@ -563,10 +585,19 @@ DELETE /api/characters/:id/chat/history
 - **バッチチャンク挿入**、**LLM耐障害性**（60秒タイムアウト+リトライ）、**トークン予算による履歴切り詰め**、**rebuild並行ロック**、**クラッシュリカバリー**、**グレースフルシャットダウン**、**helmet**。
 - **CI**：ユニット + 統合（実pgvectorデータベース）+ Dockerビルド + フロントエンドビルド、全push時に実行。
 
+**v2.4 の新機能：**
+
+- **適応的検索** — `src/lib/retrieval.js` がキャラクターごとのチャンク数に応じて top-k と閾値を自動調整：コールドスタート（データが少ない）では閾値を緩めて検索が空にならないようにし、データが豊富なときは閾値を締めてノイズを除去。`RETRIEVAL_TOP_K` / `RETRIEVAL_MIN_SCORE` を明示指定すれば固定のハード境界として機能。`GET /:id/retrieval-sweep` はキャラクター自身のコーパスで候補閾値をスキャンして推奨値を提示し、会話返答に `retrievalTier`（cold/growing/rich）が付きます。
+- **バックグラウンドジョブの永続化** — `src/lib/jobs.js` は高コストなジョブ（アーカイブ処理/再構築）を実行前に `jobs` テーブルへ記録し、プロセス再起動後に `resumePendingJobs()` が自動的に再開します。Redis不要で既存のPostgresを再利用。ハンドラーレジストリがスケジューリングと実行を分離するため、マルチインスタンス構成では BullMQ へスムーズに置き換え可能。起動時に7日以上前の完了ジョブを整理。
+- **災害耐性のあるキーバックアップ** — `src/lib/keyshares.js` は GF(256) 上の Shamir's Secret Sharing（純JS、依存ゼロ）を実装。`npm run key:split` で `ENCRYPTION_KEY` を N 個のシェアに分割（デフォルト 3-of-5）、閾値以上のシェアで復元でき、1個の漏洩では何も分からない（情報理論的安全）。`npm run key:combine` で復元。実行時の暗号処理は不変。
+- **画像書き起こしのQC** — 画像書き起こしは構造化出力 `{ transcript, confidence, ambiguities }` になり、ビジョンモデルが自ら品質を評価。低信頼度（< `TRANSCRIPT_MIN_CONFIDENCE`、デフォルト0.6）や曖昧さがある場合は `quality_issues` に記録して確認を促し、誤読したスクリーンショットがペルソナモデルに固定化されるのを防ぎます。
+- **ユーザー健全性ガードレール** — `src/lib/wellbeing.js` が過度な依存や現実混同のシグナル（英中日）を検出し、最大で24ターンに1回、キャラクター自身の声でそっと会話を地に足のついたものへ導きます（「私はデータから再構築された」）。ポップアップなし、説教なし。`WELLBEING_GROUNDING=off` で無効化可能。亡くなった人を再現することには本当の価値がある——利用者の現実感もまた守られるべきものです。
+
 ### 既知の制限（正直な説明、隠れた落とし穴ではありません）
 
 - アーカイブ編集はその1件のみ再抽出、削除はAPIコストゼロ。`POST /rebuild` は全アーカイブを再抽出——抽出ロジックをアップグレードした時のみ使用してください。
-- 検索の閾値（0.25）とtop-k（6）は環境変数 `RETRIEVAL_MIN_SCORE` / `RETRIEVAL_TOP_K` で調整可能。
+- 検索はデフォルトで適応的（top-k と閾値がデータ量に応じて伸縮）。固定のハード境界にしたい場合は `RETRIEVAL_MIN_SCORE` / `RETRIEVAL_TOP_K` を明示指定してください。
+- バックグラウンドキューはプロセス内かつPostgresで永続化（Redis不要、追加インフラゼロ）——ジョブは記録され再起動後に再開します。マルチインスタンス構成では `src/lib/jobs.js` を BullMQ に置き換え可能。
 - パスワードリセット機能は未実装（予定）。
 - スクリーンショットをbase64で保存するとストレージを圧迫します。大規模運用時はSupabase Storageに原画像を保存し、DBには書き起こしテキストのみ保持することを推奨します。
 
